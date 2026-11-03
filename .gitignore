@@ -1,0 +1,4 @@
+test/build/
+*.o
+*.elf
+*.map
