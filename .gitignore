@@ -2,3 +2,9 @@ test/build/
 *.o
 *.elf
 *.map
+.venv/
+__pycache__/
+.pio/
+build/
+.env
+.env.*

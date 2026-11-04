@@ -24,9 +24,13 @@ def broker_config(port):
             "sys_interval": 0, "auth": {"allow-anonymous": True, "plugins": ["auth_anonymous"]},
             "topic-check": {"enabled": False}}
 def start_broker(port=1883):
-    b = Broker(broker_config(port), loop=loop)
-    asyncio.run_coroutine_threadsafe(b.start(), loop).result(10)
-    return b
+    # Build the broker inside its loop: amqtt calls asyncio.get_event_loop() in its constructor, and since
+    # Python 3.14 that no longer creates a loop for a thread that has none.
+    async def make_and_start():
+        b = Broker(broker_config(port), loop=loop)
+        await b.start()
+        return b
+    return asyncio.run_coroutine_threadsafe(make_and_start(), loop).result(10)
 def stop_broker(b):
     asyncio.run_coroutine_threadsafe(b.shutdown(), loop).result(10)
 

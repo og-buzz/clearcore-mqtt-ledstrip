@@ -150,15 +150,7 @@ static_assert(LED_BUDGET_WATTS > 0.0f, "no power left for the LEDs");
 // cw / ww are ignored on PIXEL_RGB strips.
 // ============================================================================
 struct Pixel { uint8_t r, g, b, cw, ww; };
-static Pixel frame[NUM_PIXELS];
-
-static inline void setPixel(int i, uint8_t r, uint8_t g, uint8_t b, uint8_t cw = 0, uint8_t ww = 0) {
-    if (i >= 0 && i < NUM_PIXELS) { frame[i].r = r; frame[i].g = g; frame[i].b = b; frame[i].cw = cw; frame[i].ww = ww; }
-}
-
-// ============================================================================
-// Output ports
-// ============================================================================
+// All types are declared before the first function: the Arduino builder puts its generated prototypes there.
 struct LedPort {
     SerialDriver *com;        // ConnectorCOM0 / ConnectorCOM1
     DmaChannels   rxChannel;  // the SPI RX DMA channel; its ENABLE bit clears when the transfer is done
@@ -167,6 +159,15 @@ struct LedPort {
     uint32_t      bytes;      // numPixels * BYTES_PER_PIXEL + LATCH_BYTES
     uint8_t      *buf[2];     // double buffer
 };
+static Pixel frame[NUM_PIXELS];
+
+static inline void setPixel(int i, uint8_t r, uint8_t g, uint8_t b, uint8_t cw = 0, uint8_t ww = 0) {
+    if (i >= 0 && i < NUM_PIXELS) { frame[i].r = r; frame[i].g = g; frame[i].b = b; frame[i].cw = cw; frame[i].ww = ww; }
+}
+
+// ============================================================================
+// Output ports (struct LedPort is declared above, with the other types)
+// ============================================================================
 
 // DMA buffers. Each frame ends with LATCH_BYTES of 0x00, so MOSI rests low
 // between frames and the strip latches on its own.

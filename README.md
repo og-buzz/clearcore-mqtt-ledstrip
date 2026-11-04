@@ -1,9 +1,15 @@
 # ClearCore WS2811 COB strip driver with MQTT control
 
-Teknic ClearCore (SAME53, Arduino wrapper) driving a 7.5 m 24 V WS2811 COB LED
-strip from one COM port, with Ethernet + MQTT control. Built for the
-BTF-LIGHTING FCOB RGBCCT "Dual IC" strip (28 ICs/m, two WS2811 per segment:
-RGB + cool/warm white), also works with ordinary RGB WS2811 strips.
+Teknic ClearCore (SAME53, Arduino wrapper) driving an addressable 24 V LED
+strip from one COM port, with Ethernet + MQTT control. Strip presets:
+
+* BTF-LIGHTING WS2805 RGBCCT 5050, 60 LEDs/m, 10 pixels/m, 5 m (one 5-channel
+  WS2805 per pixel: R G B + two whites). The default.
+* BTF-LIGHTING FCOB RGBCCT "Dual IC", 7.5 m (28 ICs/m, two WS2811 per
+  segment: RGB + cool/warm white).
+* Ordinary RGB WS2811 strips.
+
+The `ClearCore_WS2811_COB` demo sketch supports the WS2811 strips only.
 
 | Sketch | What it is |
 |---|---|
@@ -26,14 +32,34 @@ SPI clock comes from GCLK7 = 10 MHz in the ClearCore library, so 2.5 MHz and
 5 MHz are exact. `TIMING_PROFILE 1` gives the WS2811-datasheet 200/600 ns
 pulses at 5 MHz; `STRIP_KHZ 400` handles low-speed-mode parts.
 
+WS2805 strips use `TIMING_PROFILE 2` (chosen automatically): 7 SPI bits at
+5 MHz, `0` = 400 ns high / 1000 ns low, `1` = 800 / 600 ns, 1.4 µs per bit,
+40 bits per pixel in the order R G B W1 W2. The WS2805 datasheet asks for a
+`0` high time of 220–380 ns; a 10 MHz SPI clock can only make 200 or 400 ns,
+and 400 ns is the safer of the two. All other times are inside the datasheet
+ranges, and the reset is 300 µs (datasheet: at least 280 µs).
+
 Frame rate ceiling: 28.8 µs per WS2811 IC + 0.3 ms. 105 RGBCCT segments
 (210 ICs) → ~158 fps on COM-0, ~298 fps with `USE_TWO_PORTS 1`.
 
 ## Wiring
 
-* COM-0 in SPI mode: **MOSI → strip DIN**, **GND → strip GND** (run next to
-  the data wire). RJ-45 pin numbers: ClearCore Hardware Manual, page
-  "COM-0, 1 configured for SPI devices". The port's 5 V pin is not used.
+* COM-0 in SPI mode, RJ-45 pin numbers (ClearCore Hardware Manual, "COM-0, 1
+  configured for SPI devices"):
+
+  | Pin | SPI mode | Strip |
+  |---|---|---|
+  | 5 | MOSI (130 Ω series) | DIN |
+  | 4 | GND | GND (run next to the data wire) |
+  | 5 | | also BIN (backup data) on dual-data strips: BTF's WS2805 manual joins DIN and BIN to the data output |
+  | 2, 6 | 5 V | not connected |
+  | 1, 3, 7, 8 | SS, MISO, GND, SCK | not connected |
+
+  With an RJ-45 screw-terminal breakout and a straight-through patch cable,
+  terminal N is pin N: check for 5 V from terminal 4 to terminals 2 and 6
+  before connecting the strip. Breakouts made for RS-485 often carry a 120 Ω
+  termination resistor; if it sits across 4 and 5 it pulls the data line down
+  to about 2.4 V, so remove it or switch it off.
 * Keep the data cable short. Teknic rates the COM ports at 115.2 kBaud,
   "up to 2 MBaud achievable depending on cable length"; this runs MOSI at
   2.5 Mbit/s. **Scope the strip's DIN on first power-up**: clean ~5 V pulses of
@@ -44,16 +70,16 @@ Frame rate ceiling: 28.8 µs per WS2811 IC + 0.3 ms. 105 RGBCCT segments
 
 ## Power budget
 
-Strip and ClearCore share one 24 V / 250 W supply:
+Strip and ClearCore share one 24 V supply, `PSU_WATTS` (default 360 W, 24 V 15 A):
 
 ```
-LED_BUDGET_WATTS = 250 W × 0.80 headroom − 7.2 W (ClearCore, 300 mA @ 24 V) = 192.8 W
+LED_BUDGET_WATTS = 360 W × 0.80 headroom − 7.2 W (ClearCore, 300 mA @ 24 V) = 280.8 W
 ```
 
 Every frame's draw is estimated from the pixel data (all five channels on
 CCT strips) and the frame is scaled down to stay inside the budget; colour
-balance is preserved. The BTF strip is 18–23 W/m → 172.5 W all-on at 7.5 m,
-inside the budget. Set `STRIP_W_PER_M` from your strip's label (or measure
+balance is preserved. The BTF FCOB strip is 18–23 W/m → 172.5 W all-on at 7.5 m,
+and the WS2805 strip is at most 12 W/m → 60 W at 5 m: both inside the budget. Set `STRIP_W_PER_M` from your strip's label (or measure
 it with everything on).
 
 ## MQTT
@@ -111,11 +137,15 @@ Animation never pauses for the network; MQTT is serviced between frames.
 
 In `ClearCore_WS2811_MQTT.ino`, section 1–4:
 
-* `PIXEL_TYPE` — `PIXEL_RGBCCT_2IC` (BTF dual-IC) or `PIXEL_RGB`
-* `PIXELS_PER_M` — addressable *segments* per metre (BTF RGBCCT: 14), not LEDs
-* `STRIP_W_PER_M` — watts per metre with every channel full
+* `STRIP_PRESET` — `PRESET_BTF_WS2805_5M` (default), `PRESET_BTF_FCOB_DUAL_IC_7M5`,
+  or `0` to set `PIXEL_TYPE` (`PIXEL_WS2805`, `PIXEL_RGBCCT_2IC`, `PIXEL_RGB`),
+  `STRIP_LENGTH_M`, `PIXELS_PER_M` and `STRIP_W_PER_M` by hand
+* `PIXELS_PER_M` — addressable *segments* per metre (BTF FCOB: 14, BTF WS2805: 10), not LEDs
+* `STRIP_W_PER_M` — watts per metre with every channel full (BTF WS2805 24 V 60 LED/m: 12 W/m)
+* `STRIP_WW_KELVIN`, `STRIP_CW_KELVIN` — the white LEDs' colour temperatures (for `white <kelvin>`)
 * `CCT_ORDER` — BTF does not document which white byte is which. Send
-  `white 2700` and `white 6500`; if they come out reversed, flip it.
+  `white 3000` and `white 6500`; if they come out reversed, flip it.
+* `PSU_WATTS` — the supply shared by the strip and the ClearCore
 * `COLOR_ORDER` — if colours are swapped
 * `MQTT_BROKER_IP`, `MQTT_PREFIX`, `MQTT_USER`/`MQTT_PASS`
 
@@ -128,15 +158,15 @@ package uses GCC 7, expect a few percent difference).
 ## Tests
 
 ```
-cd test
-pip install amqtt paho-mqtt
-./run_tests.sh
+python3 -m venv .venv && .venv/bin/pip install amqtt paho-mqtt
+PATH="$PWD/.venv/bin:$PATH" test/run_tests.sh
 ```
 
 Runs on a PC, no hardware. The encoder tests decode the SPI byte stream the
-sketch hands to DMA exactly as a WS2811 receiver would and compare it to an
-independent reference pipeline; they also check pulse widths, latch length
-and that the limiter never exceeds the budget. The MQTT test starts a real
+sketch hands to DMA exactly as the strip's ICs would, for every strip preset,
+and compare it to an independent reference pipeline; they also check pulse
+widths (against the WS2805 datasheet for the WS2805 preset), latch length and
+that the limiter never exceeds the budget. The MQTT test starts a real
 broker (amqtt), runs the sketch's `setup()`/`loop()` on POSIX sockets, and
 drives it with paho-mqtt: connect, last will, every command, state JSON,
 keep-alive over 20 s idle, reconnect after a broker restart.
@@ -154,6 +184,7 @@ keep-alive over 20 s idle, reconnect after a broker restart.
 * [ClearCore Hardware Manual](https://teknic.com/files/downloads/clearcore_user_manual.pdf) — COM port circuits, 5 V levels, baud statement, 300 mA draw
 * [ClearCore-library](https://github.com/Teknic-Inc/ClearCore-library) — `SerialBase.cpp` (10 MHz SPI clock, DMA), `SysManager.cpp` (COM-0 = SERCOM7, COM-1 = SERCOM0), `EthernetTcpClient.cpp`
 * [WS2811 datasheet](https://www.superlightingled.com/PDF/WS2811.pdf) — timing, ±150 ns, RGB order
+* [WS2805 datasheet](https://github.com/Aircoookie/WLED/files/13753418/Worldsemi-WS2805.EN.pdf) — 40-bit RGBW1W2 frame, timing, reset ≥ 280 µs, dual data input
 * [Adafruit DMA-driven NeoPixels](https://learn.adafruit.com/dma-driven-neopixels) — 3-bit SPI encoding precedent on SAMD51
 * [BTF-LIGHTING FCOB RGBCCT dual-IC strip](https://www.btf-lighting.com/products/fcob-ws2811-dual-ic-rgbcct-addressable-led-strip) — 28 ICs/m, 60 LEDs / 71 mm per segment
 * [WLED issue #4641](https://github.com/wled/WLED/issues/4641) — dual-IC layout (RGB + CW/WW + blank), startup flash

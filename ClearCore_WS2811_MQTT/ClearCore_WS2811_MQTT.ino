@@ -1,9 +1,10 @@
 /*
  * ClearCore_WS2811_MQTT.ino
  *
- * Teknic ClearCore -> WS2811 COB LED strip, controlled over Ethernet / MQTT.
- * Supports plain RGB WS2811 strips (one IC per segment) and the BTF-LIGHTING
- * "Dual IC" RGBCCT FCOB strip (two WS2811 ICs per segment: RGB + CW/WW).
+ * Teknic ClearCore -> addressable LED strip, controlled over Ethernet / MQTT.
+ * Supports plain RGB WS2811 strips (one IC per segment), the BTF-LIGHTING
+ * "Dual IC" RGBCCT FCOB strip (two WS2811 ICs per segment: RGB + CW/WW) and
+ * WS2805 RGBCCT strips (one 5-channel IC per segment: R G B W1 W2).
  *
  * ---------------------------------------------------------------------------
  * MQTT
@@ -46,13 +47,16 @@
  *   WS2811 waveform is synthesised on the COM port's SPI MOSI line (5 V) and
  *   pushed out by DMA; the CPU renders the next frame while one is on the wire.
  *   SPI clock from GCLK7 = 10 MHz -> 2.5 MHz (3 SPI bits per data bit:
- *   '0' = 400/800 ns, '1' = 800/400 ns) or 5 MHz (TIMING_PROFILE 1).
- *   Wiring: COM port MOSI -> strip DIN, GND -> strip GND; RJ-45 pins from the
- *   ClearCore Hardware Manual, "COM-0, 1 configured for SPI devices". Keep the
- *   data cable short and scope the strip's DIN once (clean ~5 V, 400/800 ns).
+ *   '0' = 400/800 ns, '1' = 800/400 ns) or 5 MHz (TIMING_PROFILE 1 and 2).
+ *   Wiring (RJ-45 pin numbers, ClearCore Hardware Manual "COM-0, 1 configured
+ *   for SPI devices"): pin 5 MOSI -> strip DIN, pin 4 GND -> strip GND.
+ *   Pins 2 and 6 are the port's 5 V: leave them unconnected. On dual-data
+ *   strips (DIN + BIN) connect BIN to the data line too (BTF's WS2805 manual
+ *   joins both to the controller's data output). Keep the data cable
+ *   short and scope the strip's DIN once (clean ~5 V pulses of the widths below).
  *
  * POWER
- *   Strip + ClearCore on one 24 V / 250 W supply. The limiter estimates every
+ *   Strip + ClearCore on one 24 V supply (PSU_WATTS). The limiter estimates every
  *   frame's draw and scales it to LED_BUDGET_WATTS. Inject 24 V at both ends.
  *
  * NETWORK
@@ -73,35 +77,68 @@
 #include <math.h>
 
 // ============================================================================
-// 1. STRIP  -- set these from the strip's label / datasheet
+// 1. STRIP  -- pick a preset, or STRIP_PRESET 0 and set the values by hand
 // ============================================================================
-enum PixelType  { PIXEL_RGB = 1, PIXEL_RGBCCT_2IC = 2 };   // value = WS2811 ICs per addressable segment
+// Pixel types (preprocessor values, so the timing can be chosen per type):
+#define PIXEL_RGB           1   // one WS2811 per segment: R G B                         (24 bits)
+#define PIXEL_RGBCCT_2IC    2   // two WS2811 per segment: R G B, then CW WW unused      (48 bits)
+#define PIXEL_WS2805        5   // one WS2805 per segment: R G B W1 W2                   (40 bits)
 enum ColorOrder { ORDER_RGB, ORDER_RBG, ORDER_GRB, ORDER_GBR, ORDER_BRG, ORDER_BGR };
-enum CctOrder   { CCT_CW_WW, CCT_WW_CW };
+enum CctOrder   { CCT_CW_WW, CCT_WW_CW };   // which white comes first on the wire
 
-#define PIXEL_TYPE          PIXEL_RGBCCT_2IC // BTF-LIGHTING FCOB RGBCCT "Dual IC": 2 x WS2811 per segment.
-                                            // Use PIXEL_RGB for an ordinary RGB WS2811 strip.
+#define PRESET_BTF_FCOB_DUAL_IC_7M5  1  // BTF-LIGHTING FCOB RGBCCT "Dual IC" WS2811, 7.5 m
+#define PRESET_BTF_WS2805_5M         2  // BTF-LIGHTING WS2805 RGBCCT 5050, 60 LEDs/m, 10 pixels/m, 24 V, 5 m
+#ifndef STRIP_PRESET
+#define STRIP_PRESET        PRESET_BTF_WS2805_5M
+#endif
+
+#if STRIP_PRESET == PRESET_BTF_FCOB_DUAL_IC_7M5
+#define PIXEL_TYPE          PIXEL_RGBCCT_2IC
 #define STRIP_LENGTH_M      7.5f
 #define PIXELS_PER_M        14      // addressable SEGMENTS per metre (BTF RGBCCT: 28 ICs/m / 2 = 14)
 #define STRIP_W_PER_M       23.0f   // watts per metre with every channel full (BTF: 18-23 W/m; larger used)
+#define STRIP_WW_KELVIN     3000    // colour temperature of the warm and cool white LEDs
+#define STRIP_CW_KELVIN     6000
+#elif STRIP_PRESET == PRESET_BTF_WS2805_5M
+#define PIXEL_TYPE          PIXEL_WS2805
+#define STRIP_LENGTH_M      5.0f    // 16.4 ft
+#define PIXELS_PER_M        10      // 10 WS2805 per metre, each driving 6 LEDs
+#define STRIP_W_PER_M       12.0f   // BTF manual: max 12 W/m for the 24 V 60 LED/m version
+#define STRIP_WW_KELVIN     3000    // "3000K-6500K"
+#define STRIP_CW_KELVIN     6500
+#else
+#define PIXEL_TYPE          PIXEL_RGB
+#define STRIP_LENGTH_M      5.0f
+#define PIXELS_PER_M        30
+#define STRIP_W_PER_M       14.4f
+#define STRIP_WW_KELVIN     3000
+#define STRIP_CW_KELVIN     6000
+#endif
 #define STRIP_IDLE_W_PER_M  0.0f    // standby draw per metre if the spec lists one, else 0
-#define STRIP_KHZ           800     // 800 for normal WS2811 strips; 400 only for low-speed-mode parts
-#define COLOR_ORDER         ORDER_RGB   // byte order on the RGB IC
-#define CCT_ORDER           CCT_CW_WW   // byte order on the white IC; check with "white 2700" vs "white 6500"
+#define STRIP_KHZ           800     // WS2811: 800 for normal strips, 400 only for low-speed-mode parts
+#define COLOR_ORDER         ORDER_RGB   // order of R, G, B on the wire (WS2811 and WS2805 datasheets: RGB)
+#define CCT_ORDER           CCT_CW_WW   // order of the two whites (WS2805: W1 then W2). Not documented by BTF:
+                                        // send "white 6500"; if the warm LEDs light, flip this.
 
 // ============================================================================
-// 2. POWER  -- 250 W supply shared with the ClearCore
+// 2. POWER  -- one 24 V supply shared by the strip and the ClearCore
 // ============================================================================
-#define PSU_WATTS           250.0f
+#define PSU_WATTS           360.0f  // 24 V 15 A
 #define PSU_HEADROOM        0.80f   // plan for at most 80 % of the supply's nameplate
 #define CLEARCORE_WATTS     7.2f    // ClearCore: 300 mA @ 24 V (Hardware Manual, Appendix D)
-#define LED_BUDGET_WATTS    (PSU_WATTS * PSU_HEADROOM - CLEARCORE_WATTS)   // 192.8 W
+#define LED_BUDGET_WATTS    (PSU_WATTS * PSU_HEADROOM - CLEARCORE_WATTS)   // 280.8 W with 360 W
 
 // ============================================================================
 // 3. OUTPUT
 // ============================================================================
 #define USE_TWO_PORTS       0   // 1: COM-0 drives the first half, COM-1 the second half (cut the data trace)
-#define TIMING_PROFILE      0   // 0 = NeoPixel-style 400/800 ns @ 2.5 MHz, 1 = WS2811-datasheet 200/600 ns @ 5 MHz
+#ifndef TIMING_PROFILE          // 0 = NeoPixel-style 400/800 ns @ 2.5 MHz, 1 = WS2811-datasheet 200/600 ns @ 5 MHz,
+#if PIXEL_TYPE == PIXEL_WS2805  // 2 = WS2805: 7 SPI bits @ 5 MHz (see "Derived constants")
+#define TIMING_PROFILE      2
+#else
+#define TIMING_PROFILE      0
+#endif
+#endif
 #define GAMMA_CORRECT       1
 #define LATCH_US            300
 #define REPORT_STATS        1   // USB serial log (115200): network events, fps, power
@@ -128,7 +165,7 @@ enum CctOrder   { CCT_CW_WW, CCT_WW_CW };
 // ============================================================================
 // Derived constants
 // ============================================================================
-#if STRIP_KHZ == 400
+#if STRIP_KHZ == 400 && PIXEL_TYPE != PIXEL_WS2805
 #undef  TIMING_PROFILE
 #define TIMING_PROFILE 1
 #endif
@@ -137,16 +174,26 @@ static const uint32_t SPI_HZ                = 2500000UL;
 static const int      SPI_BITS_PER_DATA_BIT = 3;
 static const uint32_t PATTERN_ZERO          = 0x4;       // 100
 static const uint32_t PATTERN_ONE           = 0x6;       // 110
-#else
+#elif TIMING_PROFILE == 1
 static const uint32_t SPI_HZ                = (STRIP_KHZ == 800) ? 5000000UL : 2500000UL;
 static const int      SPI_BITS_PER_DATA_BIT = 6;
 static const uint32_t PATTERN_ZERO          = 0x20;      // 100000
 static const uint32_t PATTERN_ONE           = 0x38;      // 111000
+#else
+// WS2805 datasheet: T0H 220-380 ns, T1H 580-1000 ns, T0L and T1L 580-1000 ns, period >= 1.25 us.
+// With the 10 MHz SERCOM clock a high pulse is 200 or 400 ns, so T0H can't be exactly in range; 400 ns
+// (20 ns long) is the safer side, since a 200 ns pulse is easier to lose. Everything else is in range:
+//   '0' = 400 ns high, 1000 ns low      '1' = 800 ns high, 600 ns low      period 1.4 us
+static const uint32_t SPI_HZ                = 5000000UL;
+static const int      SPI_BITS_PER_DATA_BIT = 7;
+static const uint32_t PATTERN_ZERO          = 0x60;      // 1100000
+static const uint32_t PATTERN_ONE           = 0x78;      // 1111000
 #endif
 
-static const int      ICS_PER_PIXEL        = (int)PIXEL_TYPE;
-static const int      WIRE_BYTES_PER_PIXEL = 3 * ICS_PER_PIXEL;
-static const int      ACTIVE_CHANNELS      = (ICS_PER_PIXEL == 2) ? 5 : 3;
+static const int      ICS_PER_PIXEL        = (PIXEL_TYPE == PIXEL_RGBCCT_2IC) ? 2 : 1;   // ICs per segment
+static const bool     HAS_WHITES           = PIXEL_TYPE != PIXEL_RGB;                    // CW + WW channels
+static const int      WIRE_BYTES_PER_PIXEL = (PIXEL_TYPE == PIXEL_RGB) ? 3 : (PIXEL_TYPE == PIXEL_WS2805) ? 5 : 6;
+static const int      ACTIVE_CHANNELS      = HAS_WHITES ? 5 : 3;
 static const int      BYTES_PER_COLOR      = SPI_BITS_PER_DATA_BIT;
 static const int      BYTES_PER_PIXEL      = WIRE_BYTES_PER_PIXEL * BYTES_PER_COLOR;
 static const int      NUM_PIXELS           = (int)(STRIP_LENGTH_M * PIXELS_PER_M + 0.5f);
@@ -159,6 +206,9 @@ static const float    STRIP_IDLE_W         = STRIP_IDLE_W_PER_M * STRIP_LENGTH_M
 static const float    FRAME_WIRE_US        = (float)PORT_BYTES * 8.0f * 1.0e6f / (float)SPI_HZ;
 
 static_assert(NUM_PIXELS > 1, "need at least two segments");
+static_assert(PIXEL_TYPE == PIXEL_RGB || PIXEL_TYPE == PIXEL_RGBCCT_2IC || PIXEL_TYPE == PIXEL_WS2805, "unknown PIXEL_TYPE");
+static_assert(PIXEL_TYPE != PIXEL_WS2805 || LATCH_US >= 280, "WS2805 needs a reset of at least 280 us");
+static_assert(STRIP_CW_KELVIN > STRIP_WW_KELVIN, "STRIP_CW_KELVIN must be above STRIP_WW_KELVIN");
 static_assert(PORT_BYTES <= 65535UL, "one DMA block is limited to 65535 bytes; use USE_TWO_PORTS");
 static_assert(LED_BUDGET_WATTS > 0.0f, "no power left for the LEDs");
 
@@ -269,12 +319,12 @@ static uint32_t prepareFrame() {
         uint8_t v2 = scale8(gammaLut[c[o[2]]], g_brightness);
         sum += (uint32_t)v0 + v1 + v2;
         *w++ = v0; *w++ = v1; *w++ = v2;
-        if (ICS_PER_PIXEL == 2) {
+        if (HAS_WHITES) {
             uint8_t cw = scale8(gammaLut[px.cw], g_brightness);
             uint8_t ww = scale8(gammaLut[px.ww], g_brightness);
             sum += (uint32_t)cw + ww;
             if (CCT_ORDER == CCT_CW_WW) { *w++ = cw; *w++ = ww; } else { *w++ = ww; *w++ = cw; }
-            *w++ = 0;
+            if (PIXEL_TYPE == PIXEL_RGBCCT_2IC) *w++ = 0;   // third output of the white WS2811 is unused
         }
     }
     return sum;
@@ -323,7 +373,7 @@ static void show() {
 static inline Pixel rgb(uint8_t r, uint8_t g, uint8_t b) { Pixel p = { r, g, b, 0, 0 }; return p; }
 static inline Pixel black() { Pixel p = { 0, 0, 0, 0, 0 }; return p; }
 static inline Pixel stripWhite() {                      // "white": real whites on CCT strips
-    if (ICS_PER_PIXEL == 2) { Pixel p = { 0, 0, 0, 255, 255 }; return p; }
+    if (HAS_WHITES) { Pixel p = { 0, 0, 0, 255, 255 }; return p; }
     return rgb(255, 255, 255);
 }
 static inline uint8_t lerp8(uint8_t a, uint8_t b, uint8_t k) {
@@ -348,9 +398,9 @@ static Pixel hueWheel(uint8_t h) {
 static Pixel whiteKelvin(int kelvin, uint8_t level) {
     if (kelvin < 2700) kelvin = 2700;
     if (kelvin > 6500) kelvin = 6500;
-    if (ICS_PER_PIXEL == 2) {
-        // strip whites are ~3000 K (ww) and ~6000 K (cw)
-        float f = (float)(kelvin - 3000) / 3000.0f;
+    if (HAS_WHITES) {
+        // mix the strip's warm (STRIP_WW_KELVIN) and cool (STRIP_CW_KELVIN) whites
+        float f = (float)(kelvin - STRIP_WW_KELVIN) / (float)(STRIP_CW_KELVIN - STRIP_WW_KELVIN);
         if (f < 0.0f) f = 0.0f;
         if (f > 1.0f) f = 1.0f;
         Pixel p = { 0, 0, 0, (uint8_t)(level * f + 0.5f), (uint8_t)(level * (1.0f - f) + 0.5f) };
@@ -429,7 +479,7 @@ static bool parseColor(const char *tok, Pixel *out) {
 }
 
 static void colorToHex(const Pixel &c, char *out) {       // out: at least 12 chars
-    if (ICS_PER_PIXEL == 2) snprintf(out, 12, "#%02x%02x%02x%02x%02x", c.r, c.g, c.b, c.cw, c.ww);
+    if (HAS_WHITES) snprintf(out, 12, "#%02x%02x%02x%02x%02x", c.r, c.g, c.b, c.cw, c.ww);
     else                    snprintf(out, 12, "#%02x%02x%02x", c.r, c.g, c.b);
 }
 

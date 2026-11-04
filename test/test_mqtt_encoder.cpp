@@ -44,7 +44,7 @@ static std::vector<uint8_t> decode(const std::vector<uint8_t> &bytes, std::vecto
         i = l;
     }
     std::vector<uint8_t> out;
-    CHECK(wsbits.size() % 24 == 0, "bit count %zu not a multiple of 24", wsbits.size());
+    CHECK(wsbits.size() % (WIRE_BYTES_PER_PIXEL * 8) == 0, "bit count %zu not a multiple of %d", wsbits.size(), WIRE_BYTES_PER_PIXEL * 8);
     for (size_t k = 0; k + 7 < wsbits.size(); k += 8) {
         uint8_t v = 0; for (int j = 0; j < 8; j++) v = (v << 1) | wsbits[k + j];
         out.push_back(v);
@@ -64,7 +64,7 @@ static void expectedWire(const Pixel *fr, int n, uint8_t powerScale, std::vector
             v = (uint8_t)(((uint16_t)v * (powerScale + 1)) >> 8);
             out.push_back(v);
         }
-        if (ICS_PER_PIXEL == 2) {
+        if (PIXEL_TYPE == PIXEL_RGBCCT_2IC || PIXEL_TYPE == PIXEL_WS2805) {
             uint8_t wv[2] = { fr[i].cw, fr[i].ww };
             if (CCT_ORDER == CCT_WW_CW) std::swap(wv[0], wv[1]);
             for (int k = 0; k < 2; k++) {
@@ -74,7 +74,7 @@ static void expectedWire(const Pixel *fr, int n, uint8_t powerScale, std::vector
                 v = (uint8_t)(((uint16_t)v * (powerScale + 1)) >> 8);
                 out.push_back(v);
             }
-            out.push_back(0);
+            if (PIXEL_TYPE == PIXEL_RGBCCT_2IC) out.push_back(0);   // unused third output of the white WS2811
         }
     }
 }
@@ -114,6 +114,18 @@ static void checkFrame(const char *label, const Pixel *fr) {
     printf("%-22s pixels=%d ports=%d  T0H=%.0f ns  T1H=%.0f ns  period=%.0f ns  latch=%.0f us  limiter=%u/255 est=%.1f W\n",
            label, NUM_PIXELS, NUM_PORTS, minHigh0 * ns, minHigh1 * ns, SPI_BITS_PER_DATA_BIT * ns, latchBits * ns / 1000.0, g_powerScale, g_estWatts);
     CHECK((minHigh0 == maxHigh0 || maxHigh0 == 0) && (minHigh1 == maxHigh1 || maxHigh1 == 0), "%s: inconsistent pulse widths", label);
+#if PIXEL_TYPE == PIXEL_WS2805
+    {   // WS2805 datasheet: T0H 220-380 ns, T1H/T0L/T1L 580-1000 ns, period >= 1250 ns, reset >= 280 us.
+        // T0H may be 400 ns: the 10 MHz SERCOM clock can't make 220-380 (see the sketch's timing notes).
+        double per = SPI_BITS_PER_DATA_BIT * ns, t0h = minHigh0 * ns, t1h = minHigh1 * ns;
+        if (maxHigh0) CHECK(t0h >= 220 && t0h <= 400, "%s: WS2805 T0H %.0f ns", label, t0h);
+        if (maxHigh0) CHECK(per - t0h >= 580 && per - t0h <= 1000, "%s: WS2805 T0L %.0f ns", label, per - t0h);
+        if (maxHigh1) CHECK(t1h >= 580 && t1h <= 1000, "%s: WS2805 T1H %.0f ns", label, t1h);
+        if (maxHigh1) CHECK(per - t1h >= 580 && per - t1h <= 1000, "%s: WS2805 T1L %.0f ns", label, per - t1h);
+        CHECK(per >= 1250, "%s: WS2805 period %.0f ns", label, per);
+        CHECK(latchBits * ns >= 280000.0, "%s: WS2805 reset %.0f ns", label, latchBits * ns);
+    }
+#endif
     CHECK(latchBits * ns >= LATCH_US * 1000.0, "%s: latch %.0f ns < %d us", label, latchBits * ns, LATCH_US);
     CHECK(g_estWatts <= LED_BUDGET_WATTS + 1e-3, "%s: estimate %.2f W exceeds budget %.2f W", label, g_estWatts, LED_BUDGET_WATTS);
 }
@@ -129,7 +141,7 @@ int main() {
     }
     // 1) demo frame from loop()
     renderScene(1234); show(); checkFrame("rainbow (render)", frame);
-    // 2) full white: limiter must engage for a 7.5 m strip on 192.8 W
+    // 2) full white: the limiter engages only if the all-on strip exceeds LED_BUDGET_WATTS
     for (int i = 0; i < NUM_PIXELS; i++) setPixel(i, 255, 255, 255, 255, 255);
     show(); checkFrame("all channels on", frame);
     {

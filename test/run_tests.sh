@@ -18,10 +18,13 @@ echo "== COB sketch: WS2811 encoder / limiter"
 g++ -std=gnu++11 -O1 -Istub  '-DSKETCH_PATH="build/sketch_cob.ino"'  test_cob_encoder.cpp  -o build/test_cob  -lm
 ./build/test_cob | tail -1
 
-echo "== MQTT sketch: WS2811 encoder / limiter"
-g++ -std=gnu++11 -O1 -Istub2 '-DSKETCH_PATH="build/sketch_mqtt.ino"' test_mqtt_encoder.cpp -o build/test_mqtt -lm -lpthread
-./build/test_mqtt | tail -1
+# Each strip preset of the MQTT sketch: 1 = BTF FCOB dual-IC WS2811, 2 = BTF WS2805, 0 = plain RGB WS2811
+for preset in 1 2 0; do
+  echo "== MQTT sketch, STRIP_PRESET $preset: encoder / limiter"
+  g++ -std=gnu++11 -O1 -Istub2 '-DSKETCH_PATH="build/sketch_mqtt.ino"' -DSTRIP_PRESET=$preset test_mqtt_encoder.cpp -o build/test_mqtt -lm -lpthread
+  ./build/test_mqtt | tail -1
+done
 
-echo "== MQTT sketch: end-to-end against a local broker"
-g++ -std=gnu++11 -O1 -Istub2 '-DSKETCH_PATH="build/sketch_mqtt.ino"' harness_mqtt.cpp -o build/harness_mqtt -lm -lpthread
+echo "== MQTT sketch: end-to-end against a local broker (FCOB preset: the test expects 105 segments)"
+g++ -std=gnu++11 -O1 -Istub2 '-DSKETCH_PATH="build/sketch_mqtt.ino"' -DSTRIP_PRESET=1 harness_mqtt.cpp -o build/harness_mqtt -lm -lpthread
 python3 mqtt_test.py 2>/dev/null | grep -E "^(PASS|FAIL|RESULT)"
